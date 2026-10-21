@@ -1,0 +1,6 @@
+{
+  "name": "Edge Detection Tool: Research-Based Canny, Sobel & Laplacian",
+  "description": "Comparative analysis and research-based implementation of classical edge detection operators (Canny, Sobel, Laplacian, LoG) and Otsu-Canny variant based on Sun & Shakhor (2024).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
