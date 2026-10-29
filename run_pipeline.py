@@ -44,6 +44,7 @@ def handle_request(payload: dict) -> dict:
         b64_str = payload["image_base64"]
         if "," in b64_str:
             b64_str = b64_str.split(",", 1)[1]
+        b64_str = b64_str.strip()
         img_bytes = base64.b64decode(b64_str)
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -57,7 +58,16 @@ def handle_request(payload: dict) -> dict:
             cv2.rectangle(img, (40, 40), (160, 160), (255, 255, 255), -1)
 
     if img is None:
-        raise ValueError("Could not decode or load input image.")
+        raise ValueError("Could not decode or load input image. Please ensure the file is a valid image (PNG, JPG, JPEG).")
+
+    # If image is excessively large, constrain to max dimension 1920 for performance and memory stability
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    if max_dim > 1920:
+        scale = 1920.0 / max_dim
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     # Apply noise if requested
     noise_type = payload.get("noise_type", "none")

@@ -66,6 +66,7 @@ export default function App() {
   const [imagePreview, setImagePreview] = useState<string>('');
   const [grayPreview, setGrayPreview] = useState<string>('');
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
   const [viewSourceMode, setViewSourceMode] = useState<'color' | 'grayscale'>('color');
 
   // Studio Display Mode: 'side-by-side' | 'split' | 'edge-only'
@@ -190,6 +191,41 @@ export default function App() {
     }
   };
 
+  // Helper for safe JSON fetching and descriptive error extraction
+  const safeFetchJson = async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
+    const res = await fetch(input, init);
+    const contentType = res.headers.get('content-type') || '';
+
+    if (!res.ok) {
+      let errorDetail = `Server returned HTTP ${res.status}`;
+      if (contentType.includes('application/json')) {
+        try {
+          const errBody = await res.json();
+          errorDetail = errBody.message || errBody.error || errorDetail;
+        } catch {
+          // keep errorDetail
+        }
+      } else {
+        try {
+          const rawText = await res.text();
+          if (rawText && rawText.length < 250) {
+            errorDetail = rawText;
+          }
+        } catch {
+          // keep errorDetail
+        }
+      }
+      throw new Error(errorDetail);
+    }
+
+    if (!contentType.includes('application/json')) {
+      const rawText = await res.text();
+      throw new Error(`Expected JSON response, received ${contentType || 'text'}: ${rawText.slice(0, 100)}`);
+    }
+
+    return (await res.json()) as T;
+  };
+
   const runDetection = async () => {
     if (!customImageBase64) {
       setCurrentResult(null);
@@ -208,18 +244,12 @@ export default function App() {
         image_base64: customImageBase64,
       };
 
-      const res = await fetch('/api/process', {
+      const data = await safeFetchJson<ProcessResponse>('/api/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      if (!res.ok) {
-        const errJson = await res.json();
-        throw new Error(errJson.message || `Server error: ${res.status}`);
-      }
-
-      const data: ProcessResponse = await res.json();
       setCurrentResult(data);
       setImagePreview(data.original_image);
       setGrayPreview(data.gray_image);
@@ -230,20 +260,18 @@ export default function App() {
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const processUploadedFile = (file: File) => {
     setUploadError(null);
     setErrorMessage(null);
-    const file = e.target.files?.[0];
-    if (!file) return;
 
-    const validMimes = ['image/png', 'image/jpeg', 'image/jpg'];
-    const validExtensions = ['.png', '.jpg', '.jpeg'];
+    const validMimes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+    const validExtensions = ['.png', '.jpg', '.jpeg', '.webp'];
     const lowerName = file.name.toLowerCase();
     const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
     const hasValidMime = validMimes.includes(file.type);
 
     if (!hasValidMime && !hasValidExt) {
-      setUploadError('Unsupported file type. Please upload a PNG, JPG, or JPEG image.');
+      setUploadError('Unsupported file type. Please upload a PNG, JPG, JPEG, or WebP image.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
@@ -253,18 +281,81 @@ export default function App() {
       setUploadError('Error reading file. Please select another image.');
       if (fileInputRef.current) fileInputRef.current.value = '';
     };
+
     reader.onload = (event) => {
       const b64 = event.target?.result as string;
       if (!b64 || !b64.startsWith('data:image/')) {
-        setUploadError('Invalid image data. Please upload a valid PNG, JPG, or JPEG image.');
+        setUploadError('Invalid image data. Please upload a valid PNG, JPG, JPEG, or WebP image.');
         if (fileInputRef.current) fileInputRef.current.value = '';
         return;
       }
-      setImageFileName(file.name);
-      setCustomImageBase64(b64);
-      setUploadError(null);
+
+      // If image is excessively large, constrain to max dimension 1600px for responsiveness and reliability
+      const img = new Image();
+      img.onload = () => {
+        const maxDimension = 1600;
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            const isPng = file.type === 'image/png' || lowerName.endsWith('.png');
+            const optimizedB64 = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.92);
+            setImageFileName(file.name);
+            setCustomImageBase64(optimizedB64);
+            setUploadError(null);
+            return;
+          }
+        }
+        setImageFileName(file.name);
+        setCustomImageBase64(b64);
+        setUploadError(null);
+      };
+      img.onerror = () => {
+        // Fallback to original base64 if Image parsing fails
+        setImageFileName(file.name);
+        setCustomImageBase64(b64);
+        setUploadError(null);
+      };
+      img.src = b64;
     };
+
     reader.readAsDataURL(file);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    processUploadedFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      processUploadedFile(file);
+    }
   };
 
   const runResearchComparison = async () => {
@@ -273,36 +364,36 @@ export default function App() {
     try {
       const basePayload: any = { image_base64: customImageBase64 };
 
-      const resManual = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...basePayload,
-          action: 'process',
-          algorithm: 'Canny',
-          params: { low_threshold: 50, high_threshold: 150, sigma: otsuSigma },
+      const [dataManual, dataOtsu] = await Promise.all([
+        safeFetchJson<ProcessResponse>('/api/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...basePayload,
+            action: 'process',
+            algorithm: 'Canny',
+            params: { low_threshold: 50, high_threshold: 150, sigma: otsuSigma },
+          }),
         }),
-      });
-      const dataManual = await resManual.json();
-
-      const resOtsu = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...basePayload,
-          action: 'process',
-          algorithm: 'Otsu-Canny',
-          params: { ratio: otsuRatio, sigma: otsuSigma },
+        safeFetchJson<ProcessResponse>('/api/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...basePayload,
+            action: 'process',
+            algorithm: 'Otsu-Canny',
+            params: { ratio: otsuRatio, sigma: otsuSigma },
+          }),
         }),
-      });
-      const dataOtsu = await resOtsu.json();
+      ]);
 
       setResearchData({
         manual: dataManual,
         otsu: dataOtsu,
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setErrorMessage(err.message || 'Failed to calculate research comparison');
     } finally {
       setResearchLoading(false);
     }
@@ -320,16 +411,16 @@ export default function App() {
         noise_amount: noiseAmount,
       };
 
-      const res = await fetch('/api/benchmark', {
+      const data = await safeFetchJson<BenchmarkResponse>('/api/benchmark', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      const data: BenchmarkResponse = await res.json();
       setBenchmarkData(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setErrorMessage(err.message || 'Failed to run benchmarks');
     } finally {
       setBenchLoading(false);
     }
@@ -524,12 +615,17 @@ export default function App() {
                 </div>
 
                 {/* Upload Control */}
-                <div>
+                <div
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={`transition-colors rounded ${isDragging ? 'ring-1 ring-[#C7F36B]' : ''}`}
+                >
                   <input
                     type="file"
                     ref={fileInputRef}
                     onChange={handleFileUpload}
-                    accept="image/png,image/jpeg,image/jpg"
+                    accept="image/png,image/jpeg,image/jpg,image/webp"
                     className="hidden"
                   />
                   <button
@@ -552,22 +648,41 @@ export default function App() {
                 {/* Preview of the uploaded image or empty state */}
                 {customImageBase64 ? (
                   <div className="space-y-1.5">
-                    <div className="w-full h-36 bg-black rounded border border-[#2C2E32] overflow-hidden flex items-center justify-center">
+                    <div className="relative w-full h-36 bg-black rounded border border-[#2C2E32] overflow-hidden flex items-center justify-center">
                       <img
                         src={customImageBase64}
                         alt="Uploaded preview"
                         className="max-h-full max-w-full object-contain"
                       />
+                      {isProcessing && (
+                        <div className="absolute inset-0 bg-black/60 flex items-center justify-center text-xs font-mono text-[#C7F36B] gap-2">
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Processing...</span>
+                        </div>
+                      )}
                     </div>
                     {imageFileName && (
-                      <div className="text-[10px] font-mono text-[#91949A] truncate">
-                        {imageFileName}
+                      <div className="flex items-center justify-between text-[10px] font-mono text-[#91949A]">
+                        <span className="truncate max-w-[200px]">{imageFileName}</span>
+                        <span className="text-[#C7F36B]">Loaded</span>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <div className="p-4 border border-dashed border-[#2C2E32] rounded text-center text-[#91949A] text-xs font-mono">
-                    Upload an image to get started.
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    className={`p-5 border border-dashed rounded text-center text-xs font-mono cursor-pointer transition-colors ${
+                      isDragging
+                        ? 'border-[#C7F36B] bg-[#C7F36B]/10 text-[#C7F36B]'
+                        : 'border-[#2C2E32] hover:border-[#91949A] text-[#91949A] hover:text-[#F2F1ED]'
+                    }`}
+                  >
+                    <Upload className="w-4 h-4 mx-auto mb-1.5 opacity-60" />
+                    <div>Upload an image to get started.</div>
+                    <div className="text-[10px] text-[#606368] mt-1">PNG, JPG, JPEG, or WebP (Drag & Drop)</div>
                   </div>
                 )}
               </div>
